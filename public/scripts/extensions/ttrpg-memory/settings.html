@@ -1,0 +1,57 @@
+<div id="ttrpg_memory_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>TTRPG Memory</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <small>
+                Сжимает историю чата в лорбук чата: «Произошло» / «Происходит» / «Будущее» + отдельные записи
+                для персонажей и локаций. Старые сообщения скрываются от модели, но остаются видны в чате.
+            </small>
+            <div id="ttrpg_memory_compress" class="menu_button menu_button_icon">
+                <i class="fa-solid fa-broom"></i>
+                <span>Очистить контекст</span>
+            </div>
+            <label class="checkbox_label">
+                <input id="ttrpg_memory_preview" type="checkbox" />
+                <span>Показывать предпросмотр перед записью</span>
+            </label>
+            <label for="ttrpg_memory_plan_interval">
+                Авто-ревизия планов «Будущего» каждые N ходов игрока (0 — выкл.)
+            </label>
+            <input id="ttrpg_memory_plan_interval" type="number" class="text_pole" min="0" max="100" step="1" />
+            <div id="ttrpg_memory_rollback" class="menu_button menu_button_icon">
+                <i class="fa-solid fa-rotate-left"></i>
+                <span>Откатить последнюю ревизию планов</span>
+            </div>
+            <label for="ttrpg_memory_max_tokens">Лимит ответа модели (токены)</label>
+            <input id="ttrpg_memory_max_tokens" type="number" class="text_pole" min="500" max="16000" step="100" />
+            <label for="ttrpg_memory_prompt">Системный промпт сжатия (ручная кнопка)</label>
+            <textarea id="ttrpg_memory_prompt" class="text_pole textarea_compact" rows="10"></textarea>
+            <div id="ttrpg_memory_prompt_restore" class="menu_button menu_button_icon">
+                <i class="fa-solid fa-rotate-left"></i>
+                <span>Сбросить промпт</span>
+            </div>
+            <label for="ttrpg_memory_plan_prompt">Системный промпт ревизии планов (авто)</label>
+            <textarea id="ttrpg_memory_plan_prompt" class="text_pole textarea_compact" rows="8"></textarea>
+            <div id="ttrpg_memory_plan_prompt_restore" class="menu_button menu_button_icon">
+                <i class="fa-solid fa-rotate-left"></i>
+                <span>Сбросить промпт</span>
+            </div>
+            <hr />
+            <label class="checkbox_label">
+                <input id="ttrpg_memory_dice_tool" type="checkbox" />
+                <span>Кубики: дать модели инструмент RollDice (Python)</span>
+            </label>
+            <small>Нужен Chat Completion с включённым «Enable function calling» и Python 3 на сервере.</small>
+            <label for="ttrpg_memory_dice_prompt">Промпт правил броска кубиков</label>
+            <textarea id="ttrpg_memory_dice_prompt" class="text_pole textarea_compact" rows="10"></textarea>
+            <div id="ttrpg_memory_dice_prompt_restore" class="menu_button menu_button_icon">
+                <i class="fa-solid fa-rotate-left"></i>
+                <span>Сбросить промпт</span>
+            </div>
+            <small id="ttrpg_memory_status"></small>
+        </div>
+    </div>
+</div>
