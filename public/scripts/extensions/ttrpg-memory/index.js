@@ -8,20 +8,25 @@ import { removeReasoningFromString } from '../../reasoning.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../slash-commands/SlashCommand.js';
 import { escapeHtml } from '../../utils.js';
+import { getTokenCountAsync } from '../../tokenizers.js';
 
 const MODULE_NAME = 'ttrpg_memory';
 const TAG = 'TTRPG';
-const TIMELINE = ['past', 'present', 'futureLocal', 'futureGlobal'];
+const TIMELINE = ['chronicle', 'recent', 'present', 'futureLocal', 'futureGlobal'];
 const PLANS = ['futureLocal', 'futureGlobal'];
-const KIND_BY_FIELD = { past: 'past', present: 'present', futureLocal: 'future_local', futureGlobal: 'future_global' };
+const KIND_BY_FIELD = { chronicle: 'chronicle', recent: 'recent', present: 'present', futureLocal: 'future_local', futureGlobal: 'future_global' };
 const FIELD_BY_KIND = Object.fromEntries(Object.entries(KIND_BY_FIELD).map(([k, v]) => [v, k]));
+FIELD_BY_KIND.past = 'recent'; // legacy single "past" entry
 FIELD_BY_KIND.future = 'futureGlobal'; // legacy single "future" entry
-const ORDER = { past: 100, present: 101, futureLocal: 102, futureGlobal: 103 };
+const LEGACY_KINDS = ['past', 'future'];
+// World Info inserts entries with a higher order closer to the chat: oldest events first, plans last.
+const ORDER = { chronicle: 98, chapter: 99, recent: 100, present: 101, futureLocal: 102, futureGlobal: 103 };
 const PLAN_WINDOW_MESSAGES = 30;
 const COMPRESSED_FLAG = 'ttrpg_compressed';
 
 const TIMELINE_HEADERS = {
-    past: '[Произошло — сжатая хронология прошлых событий]',
+    chronicle: '[Хроника — оглавление всей кампании и незакрытые нити]',
+    recent: '[Недавнее — события текущей главы]',
     present: '[Происходит — текущая сцена и состояние мира]',
     futureLocal: '[Будущее, локальный сюжет — скрытые планы Мастера на ближайшие сцены. Они могут меняться по ходу игры. Не раскрывай их игроку напрямую]',
     futureGlobal: '[Будущее, глобальный сюжет — скрытая основная арка Мастера. Меняется редко. Не раскрывай её игроку напрямую]',
@@ -29,32 +34,43 @@ const TIMELINE_HEADERS = {
 
 const defaultPrompt = `You are the memory keeper of a tabletop roleplaying game (TTRPG). Your job is to compress the chat log into a compact lorebook so the game master model can keep playing with a short context.
 
-You receive: (1) the current lorebook, (2) the new chat messages since the last compression.
+You receive: (1) the current lorebook, (2) the new chat messages since the last compression, (3) the size of "recent" and its limit.
 Return the UPDATED lorebook as a single JSON object and nothing else.
 
 JSON format:
 {
-  "past": "string",
+  "chronicle": "string",
+  "recent": "string",
   "present": "string",
   "futureLocal": "string",
   "futureGlobal": "string",
+  "closeChapter": null | { "title": "string", "keys": ["trigger word", "..."], "content": "string" },
   "entities": [
     { "type": "character | location | faction | item | other", "name": "string", "keys": ["trigger word", "..."], "content": "string" }
   ]
 }
 
-Rules:
-- "past" (what happened): rewrite the old "past" text together with the events that are no longer current. Compress hard: facts, outcomes and consequences only, no atmosphere or prose. Compress older events more than recent ones. A few short notes per event at most.
+The past is stored in three layers:
+- "chronicle": the table of contents of the whole campaign. One line per closed chapter ("Ch.N Title: key outcome"), then a "Threads:" block with everything that must never be forgotten: promises, debts, enemies made, open mysteries, lasting consequences. Keep it short, rewrite the Threads block as threads open and close.
+- "recent": the events of the CURRENT chapter that are no longer the present scene. Add the new events, compress the older ones harder. Facts, outcomes and consequences only.
+- closed chapters: archived lorebook entries, written once and never rewritten. They are triggered by keywords. You only see their titles in "chapters".
+
+Closing a chapter:
+- Most compressions do NOT close a chapter. Then return "closeChapter": null and simply update "recent".
+- Close a chapter only when a story arc is really over: a quest is resolved, the party left a location for good, a long time skip happened, the tone of the story changed. Or when "recent" is over its limit: then close the finished part even if the arc is not over.
+- When you close a chapter: put everything that belongs to it into "closeChapter.content" (outcome, key events, loot, consequences, who was involved), give it a short title, and keys = names of places, NPCs, factions and items of that chapter. Remove these events from "recent", keep only what still continues. Add a line for it to "chronicle" with the number given as NEXT CHAPTER NUMBER, and move its unresolved consequences to the Threads block.
+
+Other fields:
 - "present" (what is happening now): the current scene, location, time, who is present, ongoing actions, immediate goals, open threats, party state. Remove only filler words and empty descriptions, keep the picture detailed and concrete.
 - "futureLocal" (planned, near term): the game master's hidden plans for the next scenes: upcoming events, encounters, NPC intentions, foreshadowing. Revise the old plans: drop what already happened or became obsolete, adapt the rest to what the players did, add new plot threads. Plans must stay flexible and surprising, do not repeat a puzzle the players already solved.
 - "futureGlobal" (planned, main arc): the hidden big picture: the main antagonist, the final goal, long-term secrets. Change it rarely and carefully. The game master steers toward the goal, the players change the path, not the goal.
-- "entities": one entry per important character, location, faction or item that is new or changed. Return ONLY new or changed entities, unchanged ones are kept automatically. Content must be a short summary (appearance in a few words, role, attitude to the party, current state, inventory, secrets). Keys are the names and aliases that should trigger the entry. To remove an entity set "content" to an empty string.
+- "entities": one entry per important character, location, faction or item that is new or changed. Return ONLY new or changed entities, unchanged ones are kept automatically. Content must be a short summary (appearance in a few words, role, attitude to the party, current state, inventory, secrets). Keys are the names and aliases that should trigger the entry. To remove an entity set "content" to an empty string. Chapters mention entities by name, do not copy entity descriptions into chapters.
 - Style: the text is read only by another language model, never by a human. Ignore human readability completely and minimize length: telegraphic notes, no full sentences, no articles or filler words, use symbols and abbreviations (→ = + ; / HP lvl etc). Keep it unambiguous for an LLM: keep names exact and do not merge different facts. Short style must not drop facts, it only drops words.
 - Write in the same language as the chat. Do not invent facts that are not in the lorebook or the chat. Never put atmosphere descriptions or long quotes into any field.`;
 
 const defaultPlanPrompt = `You are the story planner of a tabletop roleplaying game (TTRPG). You maintain the game master's HIDDEN plans: "futureLocal" (next few scenes) and "futureGlobal" (main arc).
 
-You receive the current lorebook (past, present, plans) and the latest chat messages. Check what the players did and whether any plan was fulfilled, broken, made obsolete or can be developed further.
+You receive the current lorebook (chronicle with open threads, recent events, chapter titles, present, plans) and the latest chat messages. Check what the players did and whether any plan was fulfilled, broken, made obsolete or can be developed further.
 
 Return a single JSON object and nothing else:
 { "changed": true | false, "futureLocal": "string", "futureGlobal": "string" }
@@ -83,6 +99,7 @@ const defaultSettings = {
     preview: true,
     planInterval: 5,
     maxTokens: 4000,
+    recentLimit: 1500,
     prompt: defaultPrompt,
     planPrompt: defaultPlanPrompt,
 };
@@ -183,7 +200,16 @@ function entityName(entry) {
 }
 
 function entryComment(kind, type, name) {
-    return kind === 'entity' ? `${TAG}:entity:${type}:${name}` : `${TAG}:${kind}`;
+    return ['entity', 'chapter'].includes(kind) ? `${TAG}:${kind}:${type}:${name}` : `${TAG}:${kind}`;
+}
+
+function cleanName(text) {
+    return String(text ?? '').trim().replace(/:/g, ' ');
+}
+
+function cleanKeys(keys, fallback) {
+    const list = [...new Set((Array.isArray(keys) ? keys : []).map(k => String(k).trim()).filter(Boolean))];
+    return list.length ? list : [fallback];
 }
 
 function stripHeader(text) {
@@ -198,16 +224,32 @@ function findEntry(book, comment) {
  * Collects the current state of our lorebook entries.
  */
 function readBookState(book) {
-    const state = { past: '', present: '', futureLocal: '', futureGlobal: '', entities: [] };
+    const state = { chronicle: '', recent: '', present: '', futureLocal: '', futureGlobal: '', chapters: [], entities: [] };
+    const chapters = [];
     for (const entry of Object.values(book.entries).filter(isOurEntry)) {
         const [, kind, type] = entry.comment.split(':');
         if (kind === 'entity') {
             state.entities.push({ type, name: entityName(entry), keys: entry.key, content: entry.content });
+        } else if (kind === 'chapter') {
+            chapters.push({ number: Number(type) || 0, title: entityName(entry) });
         } else if (FIELD_BY_KIND[kind]) {
-            state[FIELD_BY_KIND[kind]] = stripHeader(entry.content);
+            const field = FIELD_BY_KIND[kind];
+            // A legacy entry must not override the current one.
+            if (!LEGACY_KINDS.includes(kind) || !state[field]) {
+                state[field] = stripHeader(entry.content);
+            }
         }
     }
+    // Only titles: closed chapters are archived and never rewritten.
+    state.chapters = chapters.sort((a, b) => a.number - b.number).map(c => `Ch.${c.number} ${c.title}`);
     return state;
+}
+
+function getNextChapterNumber(book) {
+    const numbers = Object.values(book.entries)
+        .filter(e => isOurEntry(e) && e.comment.startsWith(`${TAG}:chapter:`))
+        .map(e => Number(e.comment.split(':')[2]) || 0);
+    return Math.max(0, ...numbers) + 1;
 }
 
 function isToolMessage(message) {
@@ -234,8 +276,11 @@ function formatMessages(items) {
     return items.map(({ message }) => `${message.name}: ${message.mes}`).join('\n\n');
 }
 
-function buildPrompt(state, items) {
-    return `### CURRENT LOREBOOK\n${JSON.stringify(state, null, 2)}\n\n### NEW CHAT MESSAGES\n${formatMessages(items)}\n\n### TASK\nReturn the updated lorebook JSON now.`;
+function buildPrompt(state, items, { recentTokens, recentLimit, nextChapter }) {
+    const size = recentTokens > recentLimit
+        ? `${recentTokens} tokens, limit ${recentLimit}. OVER THE LIMIT: close the finished part as a chapter.`
+        : `${recentTokens} tokens, limit ${recentLimit}. Under the limit: close a chapter only if an arc is really over.`;
+    return `### CURRENT LOREBOOK\n${JSON.stringify(state, null, 2)}\n\n### RECENT SIZE\n${size}\n\n### NEXT CHAPTER NUMBER\n${nextChapter}\n\n### NEW CHAT MESSAGES\n${formatMessages(items)}\n\n### TASK\nReturn the updated lorebook JSON now.`;
 }
 
 function buildPlanPrompt(state, items) {
@@ -253,21 +298,33 @@ function parseJson(raw) {
     return JSON.parse(text.slice(start, end + 1));
 }
 
-function parseResponse(raw) {
+function parseResponse(raw, state) {
     const data = parseJson(raw);
 
-    const result = { entities: [] };
+    // A prompt saved before chapters existed still answers with a single "past" field.
+    const legacy = typeof data.past === 'string' && typeof data.recent !== 'string';
+    if (legacy) {
+        data.recent = data.past;
+        data.chronicle = typeof data.chronicle === 'string' ? data.chronicle : state.chronicle;
+    }
+
+    const result = { entities: [], chapter: null, legacy };
     for (const field of TIMELINE) {
         if (typeof data[field] !== 'string') {
             throw new Error(`В ответе нет поля "${field}"`);
         }
         result[field] = data[field].trim();
     }
+    const chapter = data.closeChapter;
+    if (chapter && typeof chapter.content === 'string' && chapter.content.trim()) {
+        const title = cleanName(chapter.title) || 'Без названия';
+        result.chapter = { title, keys: cleanKeys(chapter.keys, title), content: chapter.content.trim() };
+    }
     for (const e of Array.isArray(data.entities) ? data.entities : []) {
         if (!e || typeof e.name !== 'string' || !e.name.trim()) continue;
         result.entities.push({
             type: String(e.type || 'other').replace(/[^\p{L}\p{N}_-]/gu, '').toLowerCase() || 'other',
-            name: e.name.trim().replace(/:/g, ' '),
+            name: cleanName(e.name),
             keys: [...new Set([e.name.trim(), ...(Array.isArray(e.keys) ? e.keys : [])].map(k => String(k).trim()).filter(Boolean))],
             content: typeof e.content === 'string' ? e.content.trim() : '',
         });
@@ -290,12 +347,19 @@ function parsePlanResponse(raw, state) {
     };
 }
 
-function renderPreview(result) {
+function renderPreview(result, { nextChapter, recentTokens, recentLimit }) {
     const section = (title, body) => `<h4>${escapeHtml(title)}</h4><pre>${escapeHtml(body || '—')}</pre>`;
     const entities = result.entities.map(e => `${e.content ? '' : '[удалить] '}${e.name} (${e.type}): ${e.content}`).join('\n\n');
+    const chapter = result.chapter
+        ? section(`Новая глава ${nextChapter}: ${result.chapter.title}`, `Ключи: ${result.chapter.keys.join(', ')}\n\n${result.chapter.content}`)
+        : '<h4>Новая глава</h4><pre>— не закрыта, события остаются в «Недавнем»</pre>';
+    const warning = result.legacy ? '<p><b>Сохранён старый промпт сжатия без глав. Нажмите «Сбросить промпт» в настройках.</b></p>' : '';
     return `<div class="ttrpg_memory_preview">
         <h3>Предпросмотр лорбука</h3>
-        ${section('Произошло', result.past)}
+        ${warning}
+        ${section('Хроника', result.chronicle)}
+        ${section(`Недавнее (≈${recentTokens} из ${recentLimit} токенов)`, result.recent)}
+        ${chapter}
         ${section('Происходит', result.present)}
         ${section('Будущее: локальное', result.futureLocal)}
         ${section('Будущее: глобальное', result.futureGlobal)}
@@ -303,7 +367,7 @@ function renderPreview(result) {
     </div>`;
 }
 
-function upsertEntry(book, comment, { keys, content, constant, order }) {
+function upsertEntry(book, comment, { keys, content, constant, order, excludeRecursion = false }) {
     let entry = findEntry(book, comment);
     if (!content) {
         if (entry) delete book.entries[entry.uid];
@@ -318,6 +382,7 @@ function upsertEntry(book, comment, { keys, content, constant, order }) {
     entry.key = keys;
     entry.constant = constant;
     entry.order = order;
+    entry.excludeRecursion = excludeRecursion;
     entry.disable = false;
 }
 
@@ -326,13 +391,27 @@ function writeField(book, field, text) {
     upsertEntry(book, entryComment(KIND_BY_FIELD[field]), { keys: [], content, constant: true, order: ORDER[field] });
 }
 
-async function applyResult(bookName, book, result) {
+async function applyResult(bookName, book, result, nextChapter) {
     for (const field of TIMELINE) {
         writeField(book, field, result[field]);
     }
-    // Drop the legacy single "future" entry if it is still there.
-    const legacy = findEntry(book, entryComment('future'));
-    if (legacy) delete book.entries[legacy.uid];
+    // Drop the legacy single "past" / "future" entries if they are still there.
+    for (const kind of LEGACY_KINDS) {
+        const legacy = findEntry(book, entryComment(kind));
+        if (legacy) delete book.entries[legacy.uid];
+    }
+
+    if (result.chapter) {
+        const { title, keys, content } = result.chapter;
+        // The chronicle names every place of the chapter, so it must not trigger the chapter by recursion.
+        upsertEntry(book, entryComment('chapter', nextChapter, title), {
+            keys,
+            content: `[Глава ${nextChapter} «${title}» — архив прошлых событий]\n${content}`,
+            constant: false,
+            order: ORDER.chapter,
+            excludeRecursion: true,
+        });
+    }
 
     for (const e of result.entities) {
         // Replace an entity regardless of the type the model picked this time.
@@ -401,23 +480,32 @@ async function compressContext() {
         if (!book?.entries) throw new Error('Не удалось загрузить лорбук');
 
         const oldState = readBookState(book);
+        const nextChapter = getNextChapterNumber(book);
+        const recentLimit = settings.recentLimit;
         const raw = await generateRaw({
-            prompt: buildPrompt(oldState, items),
+            prompt: buildPrompt(oldState, items, { recentTokens: await getTokenCountAsync(oldState.recent), recentLimit, nextChapter }),
             systemPrompt: settings.prompt,
             responseLength: settings.maxTokens,
         });
-        const result = parseResponse(raw);
+        const result = parseResponse(raw, oldState);
+        const recentTokens = await getTokenCountAsync(result.recent);
 
         if (settings.preview) {
-            const confirmed = await callGenericPopup(renderPreview(result), POPUP_TYPE.CONFIRM, '', { wide: true, large: true, okButton: 'Записать', cancelButton: 'Отмена' });
+            const confirmed = await callGenericPopup(renderPreview(result, { nextChapter, recentTokens, recentLimit }), POPUP_TYPE.CONFIRM, '', { wide: true, large: true, okButton: 'Записать', cancelButton: 'Отмена' });
             if (!confirmed) {
                 setStatus('Отменено');
                 return;
             }
         }
 
-        await applyResult(bookName, book, result);
+        await applyResult(bookName, book, result, nextChapter);
         await rememberPlans(oldState);
+
+        if (result.legacy) {
+            toastr.warning('Сохранён старый промпт сжатия без глав. Нажмите «Сбросить промпт» в настройках.', 'TTRPG Memory');
+        } else if (!result.chapter && recentTokens > recentLimit * 1.5) {
+            toastr.warning(`«Недавнее» заметно больше лимита (≈${recentTokens} из ${recentLimit} токенов), а глава не закрыта.`, 'TTRPG Memory');
+        }
 
         // Keep only the last character message (and anything after it) visible to the model.
         const lastAi = items.findLast(({ message }) => !message.is_user);
@@ -431,7 +519,7 @@ async function compressContext() {
         }
 
         setStatus(`Готово: скрыто сообщений — ${lastAi ? items.filter(i => i.index < lastAi.index).length : 0}`);
-        toastr.success('Контекст сжат в лорбук');
+        toastr.success(result.chapter ? `Контекст сжат, закрыта глава ${nextChapter} «${result.chapter.title}»` : 'Контекст сжат в лорбук');
     } catch (error) {
         console.error('[TTRPG Memory]', error);
         setStatus(`Ошибка: ${error.message}`);
@@ -557,6 +645,10 @@ function loadSettingsUi() {
     });
     $('#ttrpg_memory_max_tokens').val(settings.maxTokens).on('input', function () {
         settings.maxTokens = Math.max(500, Number($(this).val()) || defaultSettings.maxTokens);
+        saveSettingsDebounced();
+    });
+    $('#ttrpg_memory_recent_limit').val(settings.recentLimit).on('input', function () {
+        settings.recentLimit = Math.max(300, Number($(this).val()) || defaultSettings.recentLimit);
         saveSettingsDebounced();
     });
     for (const [id, key, fallback] of [['ttrpg_memory_prompt', 'prompt', defaultPrompt], ['ttrpg_memory_plan_prompt', 'planPrompt', defaultPlanPrompt]]) {
